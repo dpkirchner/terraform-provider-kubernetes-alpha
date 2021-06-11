@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-go/tftypes"
 	"github.com/hashicorp/terraform-provider-kubernetes-alpha/openapi"
@@ -192,11 +193,55 @@ func RemoveServerSideFields(in map[string]interface{}) map[string]interface{} {
 	delete(meta, "generation")
 	delete(meta, "selfLink")
 
-	// TODO: we should be filtering API responses based on the contents of 'managedFields'
-	// and only retain the attributes for which the manager is Terraform
+	removeFieldsManagedByOthers(in)
 	delete(meta, "managedFields")
 
 	return in
+}
+
+func removeFieldsManagedByOthers(in map[string]interface{}) {
+	meta := in["metadata"].(map[string]interface{})
+	managedFields, ok := meta["managedFields"]
+	if !ok {
+		return
+	}
+	for _, m := range managedFields.([]interface{}) {
+		v, ok := m.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		fields, ok := v["fieldsV1"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if v["manager"] != "Terraform" {
+			recursivelyRemoveFields(in, fields)
+		}
+	}
+}
+
+func recursivelyRemoveFields(in map[string]interface{}, fields map[string]interface{}) {
+	for fk, v := range fields {
+		// all field names in managedFields have a f: prefix attached
+		k := strings.TrimLeft(fk, "f:")
+
+		if k == "." {
+			continue
+		}
+
+		switch vv := v.(type) {
+		case map[string]interface{}:
+			if len(vv) == 0 {
+				delete(in, k)
+			} else {
+				deeper, ok := in[k].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				recursivelyRemoveFields(deeper, vv)
+			}
+		}
+	}
 }
 
 func (ps *RawProviderServer) lookUpGVKinCRDs(ctx context.Context, gvk schema.GroupVersionKind) (interface{}, error) {
